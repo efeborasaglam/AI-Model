@@ -234,4 +234,25 @@ ${cleaned}`;
     return safeJson(content);
 }
 
-module.exports = { pdfToImages, parseImage, extractInvoice };
+async function extractTextLayer(buffer, maxPages = 3) {
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const doc = await pdfjs.getDocument({
+        data: new Uint8Array(buffer),
+        useSystemFonts: true,
+        isEvalSupported: false,
+    }).promise;
+
+    const out = [];
+    for (let i = 1; i <= Math.min(doc.numPages, maxPages); i++) {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        out.push(content.items.map((it) => it.str + (it.hasEOL ? '\n' : ' ')).join(''));
+    }
+    return out.join('\n\n---\n\n');
+}
+
+function invoiceScore(text) {
+    return (text.match(KEYWORDS) || []).length;
+}
+
+module.exports = { pdfToImages, parseImage, extractInvoice, extractTextLayer, invoiceScore };

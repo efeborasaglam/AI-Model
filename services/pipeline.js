@@ -1,5 +1,5 @@
 const Invoice = require('../models/Invoice');
-const { pdfToImages, parseImage, extractInvoice } = require('./nvidia');
+const { pdfToImages, parseImage, extractInvoice, extractTextLayer, invoiceScore } = require('./nvidia');
 const { validateInvoice } = require('./validate');
 
 function fail(status, message) {
@@ -34,11 +34,23 @@ function detectReminderLevel(text) {
 
 // Throws an error with .status = 422 if the file is not an invoice
 async function processFile({ userId, buffer, mimetype, originalname, extra = {} }) {
-    const images = mimetype === 'application/pdf' ? await pdfToImages(buffer) : [{ buffer, mime: mimetype }];
+    let text = '';
 
-    const pages = [];
-    for (const img of images) pages.push(await parseImage(img.buffer, img.mime));
-    const text = pages.join('\n\n---\n\n').trim();
+    if (mimetype === 'application/pdf') {
+        text = (await extractTextLayer(buffer).catch(() => '')).trim();
+        if (text.length > 200) {
+            if (invoiceScore(text) < 2) throw fail(422, "This doesn't look like an invoice.");
+            console.log('[pipeline] text layer found, Nemotron skipped');
+        } else {
+            text = ''; // scanned PDF, needs OCR
+        }
+    }
+
+    if (!text) {
+        const images = mimetype === 'application/pdf' ? await pdfToImages(buffer, 2) : [{ buffer, mime: mimetype }];
+        const pages = await Promise.all(images.map((img) => parseImage(img.buffer, img.mime)));
+        text = pages.join('\n\n---\n\n').trim();
+    }
     if (!text) throw fail(422, 'Could not read any text from this file.');
 
     const ai = await extractInvoice(text);
@@ -56,7 +68,7 @@ async function processFile({ userId, buffer, mimetype, originalname, extra = {} 
         invoiceNumber: ai.invoiceNumber || null,
         amount: toNumber(ai.amount),
         currency: ai.currency || 'EUR',
-        reminderLevel: fromText ?? (Number.isInteger(ai.reminderLevel) ? ai.reminderLevel : 0),
+        reminderLevel: Math.max(fromText ?? 0, Number.isInteger(ai.reminderLevel) ? ai.reminderLevel : 0),
         issueDate: toDate(ai.issueDate),
         dueDate: toDate(ai.dueDate),
         iban: ai.iban ? String(ai.iban).replace(/\s+/g, '').toUpperCase() : null,
